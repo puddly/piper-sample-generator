@@ -318,8 +318,7 @@ def generate_audio(
     x, m_p_orig, logs_p_orig, x_mask = model.enc_p(x, x_lengths)
     emb0 = model.emb_g(speaker_1)
     emb1 = model.emb_g(speaker_2)
-    # g = slerp(emb0, emb1, slerp_weight).unsqueeze(-1)  # [b, h, 1]
-    g = emb0.unsqueeze(-1)
+    g = slerp(emb0, emb1, slerp_weight).unsqueeze(-1)  # [b, h, 1]
 
     if model.use_sdp:
         logw = model.dp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w)
@@ -360,14 +359,15 @@ def get_phonemes(
     phoneme_input: bool = False,
 ) -> Tuple[List[int], Optional[int]]:
     # Combine all sentences
-    if not phoneme_input:
+    if phoneme_input:
+        phonemes = [p for p in list(text)]
+    else:
         phonemes = [
             p
             for sentence_phonemes in phonemize_espeak(text, voice)
             for p in sentence_phonemes
-        ]
-    else:
-        phonemes = [p for p in list(text)]
+        ]        
+
     if verbose is True:
         _LOGGER.debug("Phonemes: %s", phonemes)
 
@@ -491,7 +491,7 @@ def main() -> None:
         help="Maximum number of speakers to use (default: all)",
     )
     parser.add_argument("--min-phoneme-count", type=int)
-    parser.add_argument("--phoneme-input", type=bool)
+    parser.add_argument("--phoneme-input", action="store_true")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args().__dict__
 

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torchaudio
+import webrtcvad
 from piper_phonemize import phonemize_espeak
 
 from piper_train.vits import commons
@@ -37,6 +38,7 @@ def generate_samples(
     verbose: bool = False,
     auto_reduce_batch_size: bool = False,
     min_phoneme_count: Optional[int] = None,
+    phoneme_input: bool = False,
     **kwargs,
 ) -> None:
     """
@@ -61,6 +63,7 @@ def generate_samples(
                                        if CUDA OOM errors are detected, and try to resume generation.
         min_phoneme_count (int): If set, ensure this number of phonemes is always sent to the model.
                                  Clip audio to extract original phrase.
+        phoneme-input (bool): Set to indicate given input text is phoneme input.
 
     Returns:
         None
@@ -156,7 +159,7 @@ def generate_samples(
             clip_indexes_by_batch = []
             for i in range(batch_size):
                 phoneme_ids, clip_phoneme_index = get_phonemes(
-                    voice, config, next(texts), verbose, min_phoneme_count
+                    voice, config, next(texts), verbose, min_phoneme_count, phoneme_input
                 )
                 phoneme_ids_by_batch.append(phoneme_ids)
                 clip_indexes_by_batch.append(clip_phoneme_index)
@@ -234,6 +237,11 @@ def generate_samples(
             audio_int16 = audio_float_to_int16(audio)
             for audio_idx in range(audio_int16.shape[0]):
                 audio_data = np.trim_zeros(audio_int16[audio_idx].flatten())
+                                # Use webrtcvad to trip silence from the clips
+
+                audio_data = remove_silence(audio_data)[
+                    None,
+                ]
 
                 if isinstance(file_names, it.cycle):
                     wav_path = output_dir / next(file_names)
@@ -260,6 +268,26 @@ def generate_samples(
         batch_idx += 1
 
     _LOGGER.info("Done")
+
+
+def remove_silence(
+    x: np.ndarray,
+    frame_duration: float = 0.030,
+    sample_rate: int = 16000,
+    min_start: int = 2000,
+) -> np.ndarray:
+    """Uses webrtc voice activity detection to remove silence from the clips"""
+    vad = webrtcvad.Vad(0)
+    if x.dtype in (np.float32, np.float64):
+        x = (x * 32767).astype(np.int16)
+    x_new = x[0:min_start].tolist()
+    step_size = int(sample_rate * frame_duration)
+    for i in range(min_start, x.shape[0] - step_size, step_size):
+        vad_res = vad.is_speech(x[i : i + step_size].tobytes(), sample_rate)
+        if vad_res:
+            x_new.extend(x[i : i + step_size].tolist())
+    return np.array(x_new).astype(np.int16)
+
 
 def generate_audio(
     model,
@@ -290,7 +318,8 @@ def generate_audio(
     x, m_p_orig, logs_p_orig, x_mask = model.enc_p(x, x_lengths)
     emb0 = model.emb_g(speaker_1)
     emb1 = model.emb_g(speaker_2)
-    g = slerp(emb0, emb1, slerp_weight).unsqueeze(-1)  # [b, h, 1]
+    # g = slerp(emb0, emb1, slerp_weight).unsqueeze(-1)  # [b, h, 1]
+    g = emb0.unsqueeze(-1)
 
     if model.use_sdp:
         logw = model.dp(x, x_mask, g=g, reverse=True, noise_scale=noise_scale_w)
@@ -328,13 +357,17 @@ def get_phonemes(
     text: str,
     verbose: bool = False,
     min_phoneme_count: Optional[int] = None,
+    phoneme_input: bool = False,
 ) -> Tuple[List[int], Optional[int]]:
     # Combine all sentences
-    phonemes = [
-        p
-        for sentence_phonemes in phonemize_espeak(text, voice)
-        for p in sentence_phonemes
-    ]
+    if not phoneme_input:
+        phonemes = [
+            p
+            for sentence_phonemes in phonemize_espeak(text, voice)
+            for p in sentence_phonemes
+        ]
+    else:
+        phonemes = [p for p in list(text)]
     if verbose is True:
         _LOGGER.debug("Phonemes: %s", phonemes)
 
@@ -458,6 +491,7 @@ def main() -> None:
         help="Maximum number of speakers to use (default: all)",
     )
     parser.add_argument("--min-phoneme-count", type=int)
+    parser.add_argument("--phoneme-input", type=bool)
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args().__dict__
 

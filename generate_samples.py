@@ -130,9 +130,9 @@ def generate_samples(
     if isinstance(text, str) and os.path.exists(text):
         texts = it.cycle(
             [
-                i.strip()
+                i.strip('\n')
                 for i in open(text, "r", encoding="utf-8").readlines()
-                if len(i.strip()) > 0
+                if len(i.strip('\n')) > 0
             ]
         )
     elif isinstance(text, list):
@@ -233,7 +233,8 @@ def generate_samples(
 
             # Resample audio
             audio = resampler(audio.cpu()).numpy()
-
+            # single_phoneme_tensor = torch.tensor(phoneme_samples)
+            # print(torch.std_mean(single_phoneme_tensor, 0))
             audio_int16 = audio_float_to_int16(audio)
             for audio_idx in range(audio_int16.shape[0]):
                 audio_data = np.trim_zeros(audio_int16[audio_idx].flatten())

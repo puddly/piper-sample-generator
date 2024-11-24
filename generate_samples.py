@@ -22,13 +22,33 @@ _LOGGER = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG)
 
 
+def load_model(model: Union[str, Path] = _DIR / "models" / "en_US-libritts_r-medium.pt"):
+    _LOGGER.debug("Loading %s", model)
+    model_path = Path(model)
+
+    torch_model = torch.load(model_path)
+    torch_model.eval()
+    _LOGGER.info("Successfully loaded the model")
+
+    if torch.cuda.is_available():
+        torch_model.cuda()
+        _LOGGER.debug("CUDA available, using GPU")
+
+    config_path = f"{model_path}.json"
+    with open(config_path, "r", encoding="utf-8") as config_file:
+        config = json.load(config_file)
+
+    return torch_model, config
+
+
 # Main generation function
 def generate_samples(
     text: Union[List[str], str],
+    torch_model,
+    config: dict,
     output_dir: Union[str, Path],
     max_samples: Optional[int] = None,
     file_names: Optional[List[str]] = None,
-    model: Union[str, Path] = _DIR / "models" / "en_US-libritts_r-medium.pt",
     batch_size: int = 1,
     slerp_weights: Tuple[float, ...] = (0.5,),
     length_scales: Tuple[float, ...] = (0.75, 1, 1.25),
@@ -70,23 +90,8 @@ def generate_samples(
     if max_samples is None:
         max_samples = len(text)
 
-    _LOGGER.debug("Loading %s", model)
-    model_path = Path(model)
-
-    torch_model = torch.load(model_path)
-    torch_model.eval()
-    _LOGGER.info("Successfully loaded the model")
-
-    if torch.cuda.is_available():
-        torch_model.cuda()
-        _LOGGER.debug("CUDA available, using GPU")
-
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    config_path = f"{model_path}.json"
-    with open(config_path, "r", encoding="utf-8") as config_file:
-        config = json.load(config_file)
 
     voice = config["espeak"]["voice"]
     sample_rate = config["audio"]["sample_rate"]
@@ -253,7 +258,9 @@ def generate_samples(
             # print(f"Batch {batch_idx +1}/{max_samples//batch_size} complete", " "*200, end='\r')
 
         # Next batch
-        _LOGGER.debug("Batch %s/%s complete", batch_idx + 1, max_samples // batch_size)
+        if max_samples // batch_size > 1:
+            _LOGGER.debug("Batch %s/%s complete", batch_idx + 1, max_samples // batch_size)
+
         speakers_batch = list(it.islice(speakers_iter, 0, batch_size))
         batch_idx += 1
 
@@ -474,7 +481,10 @@ def main() -> None:
     args = parser.parse_args().__dict__
 
     # Generate speech
-    generate_samples(**args)
+    torch_model, config = load_model(model=args["model"])
+    del args["model"]
+
+    generate_samples(torch_model=torch_model, config=config, **args)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ def generate_samples(
     auto_reduce_batch_size: bool = False,
     min_phoneme_count: Optional[int] = None,
     phoneme_input: bool = False,
+    retry_batch_without_mps: bool = False,
     **kwargs,
 ) -> None:
     """
@@ -64,6 +65,7 @@ def generate_samples(
         min_phoneme_count (int): If set, ensure this number of phonemes is always sent to the model.
                                  Clip audio to extract original phrase.
         phoneme-input (bool): Set to indicate given input text is phoneme input.
+        retry_batch_without_mps (bool): If a batch fails due a length error on MPS, try without it.
 
     Returns:
         None
@@ -198,17 +200,38 @@ def generate_samples(
                         gc.collect()
                         counter += 1  # reduce batch size to avoid OOM errors
             else:
-                audio, phoneme_samples = generate_audio(
-                    torch_model,
-                    speaker_1,
-                    speaker_2,
-                    phoneme_ids_by_batch,
-                    slerp_weight,
-                    noise_scale,
-                    noise_scale_w,
-                    length_scale,
-                    max_len,
-                )
+                try:
+                    audio, phoneme_samples = generate_audio(
+                        torch_model,
+                        speaker_1,
+                        speaker_2,
+                        phoneme_ids_by_batch,
+                        slerp_weight,
+                        noise_scale,
+                        noise_scale_w,
+                        length_scale,
+                        max_len,
+                    )
+                except NotImplementedError:
+                    # PyTorch + MPS has a bug with Conv2D operations on large tensors
+                    if not retry_batch_without_mps:
+                        raise
+
+                    _LOGGER.debug("Batch failed on MPS GPU, retrying on CPU")
+                    audio, phoneme_samples = generate_audio(
+                        torch_model.to("cpu"),
+                        speaker_1,
+                        speaker_2,
+                        phoneme_ids_by_batch,
+                        slerp_weight,
+                        noise_scale,
+                        noise_scale_w,
+                        length_scale,
+                        max_len,
+                        disable_mps=True,
+                    )
+                    torch_model.to("mps")
+
                 if torch.backends.mps.is_available():
                     # There seems to be a memory leak if we don't empty the cache after each batch with mps
                     torch.mps.empty_cache()
@@ -300,6 +323,7 @@ def generate_audio(
     noise_scale_w,
     length_scale,
     max_len,
+    disable_mps=False,
 ):
     x = torch.LongTensor(phoneme_ids)
     x_lengths = torch.LongTensor([len(i) for i in phoneme_ids])
@@ -309,7 +333,7 @@ def generate_audio(
         speaker_2 = speaker_2.cuda()
         x = x.cuda()
         x_lengths = x_lengths.cuda()
-    elif torch.backends.mps.is_available():
+    elif torch.backends.mps.is_available() and not disable_mps:
         mps_device = torch.device("mps")
         speaker_1 = speaker_1.to(mps_device)
         speaker_2 = speaker_2.to(mps_device)
